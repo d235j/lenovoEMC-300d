@@ -66,6 +66,7 @@
 #include <linux/pci.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/lpc_ich.h>
+#include <linux/dmi.h>
 
 #define ACPIBASE		0x40
 #define ACPIBASE_GPE_OFF	0x28
@@ -859,6 +860,17 @@ static int lpc_ich_check_conflict_gpio(struct resource *res)
 
 	if (!acpi_check_region(res->start + 0x30, 0x10, "LPC ICH GPIO2"))
 		use_gpio |= 1 << 1;
+
+	/*
+	 * The IOmega/Lenovo EMC StorCenter PX-300d series
+	 * has a generic BIOS that reserves the GPIO1 range,
+	 * but uses certain GPIOs in that range for its LCD
+	 * module. We need to override this check to allow the
+	 * LCD driver access to those GPIOs.
+	 */
+	if(dmi_match(DMI_BOARD_NAME, "StorCenter Pro xxxx")) {
+		use_gpio |= 1<<0;
+	}
 
 	ret = acpi_check_region(res->start + 0x00, 0x30, "LPC ICH GPIO1");
 	if (!ret)
