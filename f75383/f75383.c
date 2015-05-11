@@ -1,5 +1,5 @@
 /*
- * f75383.c - driver for the Fintek F75383/F75384 temperature sensor
+ * f75383.c - driver for the Fintek F75383/F75384/F75393 temperature sensor
  *          
  * Copyright (C) 2004-2006  Jean Delvare <khali@linux-fr.org>
  * Brian Beardall <brian@rapsure.net>
@@ -12,6 +12,8 @@
  *
  * The F75383 is a temperature sensors with one remote, and one local sensor.
  * the sensors behave the same.
+ * The F75393 is identical to the F75383, with the addition of beta
+ * compensation, which is not supported by this driver.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -46,10 +48,10 @@
 static unsigned short normal_i2c[] = { 0x4c, 0x4d, I2C_CLIENT_END };
 
 /*
- * Insmod parameters
+ * Supported chips
  */
 
-I2C_CLIENT_INSMOD_1(f75383);
+enum chips { f75383, f75393 };
 
 /*
  * The F75383 registers
@@ -59,7 +61,8 @@ I2C_CLIENT_INSMOD_1(f75383);
 #define F75383_REG_CONFIG_READ			0x03
 #define F75383_REG_CONFIG_WRITE			0x09
 #define F75383_STATUS				0x02
-#define F75383_CONV_RATE			0x08
+#define F75383_REG_CRR_READ			0x04 /*Conversion Rate Register */
+#define F75383_REG_CRR_WRITE			0x0A
 #define F75383_ONE_SHOT				0x0F
 #define F75383_ALERT_TIMEOUT			0x22
 #define F75383_STATUS_ARA			0x24
@@ -71,6 +74,8 @@ I2C_CLIENT_INSMOD_1(f75383);
 #define F75383_VENDOR_ID1_LOC2			0x5E
 #define F75383_VENDOR_ID2			0xFE /* might be different */
 /* #define F75383_VALUE_RAM			0x10 - 0x2F */
+#define F75383_VERSION				0x5C
+#define F75383_FAN_TIMER			0x60
 #define F75383_VT1_HIGH				0x00
 #define F75383_VT1_LOW				0x1A
 #define F75383_VT2_HIGH				0x01
@@ -91,6 +96,11 @@ I2C_CLIENT_INSMOD_1(f75383);
 #define F75383_VT1_THERM_HYST			0x21
 #define F75383_VT2_THERM_LIMIT			0x19
 #define F75383_VT2_THERM_HYST			0x23
+
+#define F75383_MFR_ID				0x1934
+#define F75383_ID				0x0303
+#define F75393_ID				0x0707
+
 
 
 /* For the F75383 Both temperature sensors are read the same. VT1 is local, 
@@ -115,24 +125,33 @@ I2C_CLIENT_INSMOD_1(f75383);
  * Functions declaration
  */
 
-static int f75383_attach_adapter(struct i2c_adapter *adapter);
-static int f75383_detach_client(struct i2c_client *client);
-
 static struct f75383_data *f75383_update_device(struct device *dev);
 
-static int f75383_detect(struct i2c_adapter *adapter, int address, int kind);
-static void f75383_init_client(struct i2c_client *client);
+static int f75383_detect(struct i2c_client *client, struct i2c_board_info *info);
+static int f75383_probe(struct i2c_client *client, const struct i2c_device_id *id);
+static int f75383_remove(struct i2c_client *client);
+
+static const struct i2c_device_id f75383_id[] = {
+	{ "f75383", f75383 },
+	{ "f75393", f75393 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, f75383_id);
 
 /*
  * Driver data (common to all clients)
  */
 
 static struct i2c_driver f75383_driver = {
+	.class		= I2C_CLASS_HWMON,
 	.driver = {
-		.name	= "F75383",
+		.name	= "f75383",
 	},
-	.attach_adapter	= f75383_attach_adapter,
-	.detach_client	= f75383_detach_client,
+	.probe		= f75383_probe,
+	.remove		= f75383_remove,
+	.id_table	= f75383_id,
+	.detect		= f75383_detect,
+	.address_list	= normal_i2c,
 };
 
 /*
@@ -140,9 +159,10 @@ static struct i2c_driver f75383_driver = {
  */
 
 struct f75383_data {
-	struct i2c_client client;
-	struct class_device *class_dev;
+	struct i2c_client *client;
+	struct device *hwmon_dev;
 	struct mutex update_lock;
+	int kind;
 	char valid; /* zero until following fields are valid */
 	unsigned long last_updated; /* in jiffies */
 
@@ -359,150 +379,124 @@ static DEVICE_ATTR(temp2_hyst, S_IWUSR | S_IRUGO, show_temp2_hyst,
 
 static DEVICE_ATTR(alarms, S_IRUGO, show_alarms, NULL);
 
+static struct attribute *f75383_attributes[] = {
+	&sensor_dev_attr_temp1_input.dev_attr.attr,
+	&sensor_dev_attr_temp2_input.dev_attr.attr,
+	&sensor_dev_attr_temp1_min.dev_attr.attr,
+	&sensor_dev_attr_temp2_min.dev_attr.attr,
+	&sensor_dev_attr_temp1_max.dev_attr.attr,
+	&sensor_dev_attr_temp2_max.dev_attr.attr,
+	&dev_attr_temp1_crit.attr,
+	&dev_attr_temp2_crit.attr,
+	&dev_attr_temp1_hyst.attr,
+	&dev_attr_temp2_hyst.attr,
+	&dev_attr_alarms.attr,
+	NULL
+};
+
+static const struct attribute_group f75383_group = {
+	.attrs = f75383_attributes,
+};
+
 /*
  * Real code
  */
-
-static int f75383_attach_adapter(struct i2c_adapter *adapter)
-{
-	if (!(adapter->class & I2C_CLASS_HWMON))
-		return 0;
-	return i2c_probe(adapter, &addr_data, f75383_detect);
-}
 
 /*
  * The following function does more than just detection. If detection
  * succeeds, it also registers the new chip.
  */
-static int f75383_detect(struct i2c_adapter *adapter, int address, int kind)
+static int f75383_detect(struct i2c_client *client, struct i2c_board_info *info)
 {
-	struct i2c_client *new_client;
-	struct f75383_data *data;
-	int err = 0;
+	struct i2c_adapter *adapter = client->adapter;
+	u16 man_id, chip_id;
+	u8 version;
+	const char *name = NULL;
 
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
-		goto exit;
+		return -ENODEV;	
 
-	if (!(data = kzalloc(sizeof(struct f75383_data), GFP_KERNEL))) {
-		err = -ENOMEM;
-		goto exit;
+	/* detection and identification */
+	man_id = (i2c_smbus_read_byte_data(client,
+                        F75383_VENDOR_ID1_LOC1) << 8) |
+                        i2c_smbus_read_byte_data(client,
+                        F75383_VENDOR_ID1_LOC2);
+	chip_id = (i2c_smbus_read_byte_data(client,
+                        F75383_CHIP_ID1) << 8) |
+                        i2c_smbus_read_byte_data(client,
+                        F75383_CHIP_ID2);
+	if (man_id < 0 || chip_id < 0)
+		return -ENODEV;
+
+	if (man_id != F75383_MFR_ID) {
+		pr_info("[%s] : can't fined Fintek F75383/F75384/F75393. \n", __func__);
+		return -ENODEV;
 	}
-
-	/* The common I2C client data is placed right before the
-	   F75383-specific data. */
-	new_client = &data->client;
-	i2c_set_clientdata(new_client, data);
-	new_client->addr = address;
-	new_client->adapter = adapter;
-	new_client->driver = &f75383_driver;
-	new_client->flags = 0;
-
-	/* Default to an F75383 if forced */
-	if (kind == 0)
-		kind = f75383;
-
-	if (kind < 0) { /* must identify */
-		u8 chip_id1, chip_id2, vendor_id1_loc1, vendor_id1_loc2;
-
-		chip_id1 = i2c_smbus_read_byte_data(new_client,
-			 F75383_CHIP_ID1);
-		chip_id2 = i2c_smbus_read_byte_data(new_client,
-			  F75383_CHIP_ID2);
-		vendor_id1_loc1 = i2c_smbus_read_byte_data(new_client,
-			  F75383_VENDOR_ID1_LOC1);
-		vendor_id1_loc2 = i2c_smbus_read_byte_data(new_client,
-			  F75383_VENDOR_ID1_LOC2);
-
-		if (chip_id1 == 0x03 /*  */
-		 && chip_id2 == 0x03 /*  */
-		 && vendor_id1_loc1 == 0x19
-		 && vendor_id1_loc2 == 0x34 ) {
-			kind = f75383;
-		} else { /* failed */
-			dev_dbg(&adapter->dev, "Unsupported chip "
-				"(chip_id1=0x%02X, chip_id2=0x%02X).\n",
-				chip_id1, chip_id2);
-			goto exit_free;
-		}
+	else if(chip_id == F75383_ID) {
+		name = "f75383";
 	}
+	else if(chip_id == F75393_ID) {
+		name = "f75393";
+	}
+	else {
+		dev_dbg(&adapter->dev, "Unsupported chip id"
+			"(chip_id=0x%04X).\n", chip_id);
+	}
+	version = i2c_smbus_read_byte_data(client, F75383_VERSION);
+	dev_info(&adapter->dev, "found %s version: %02X\n", name, version);
+	strlcpy(info->type, name, I2C_NAME_SIZE);
 
-	strlcpy(new_client->name, "f75383", I2C_NAME_SIZE);
-	data->valid = 0;
+	return 0;
+}
+
+static int f75383_probe(struct i2c_client *client, const struct i2c_device_id *id)
+{
+	struct device *dev = &client->dev;
+	struct f75383_data *data;
+	int err;
+
+	data = devm_kzalloc(dev, sizeof(struct f75383_data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	/* Set the device type */
+	i2c_set_clientdata(client, data);
 	mutex_init(&data->update_lock);
+	data->kind = id->driver_data;
 
-	/* Tell the I2C layer a new client has arrived */
-	if ((err = i2c_attach_client(new_client)))
+	/* register sysfs nodes */
+	if ((err = sysfs_create_group(&client->dev.kobj, &f75383_group)))
 		goto exit_free;
 
-	/* Initialize the F75383 chip */
-	f75383_init_client(new_client);
+	data->hwmon_dev = hwmon_device_register(&client->dev);
 
-	/* Register sysfs hooks */
-	data->class_dev = hwmon_device_register(&new_client->dev);
-	if (IS_ERR(data->class_dev)) {
-		err = PTR_ERR(data->class_dev);
-		goto exit_detach;
+	if (IS_ERR(data->hwmon_dev)) {
+		err = PTR_ERR(data->hwmon_dev);
+		goto exit_remove;
 	}
-
-	device_create_file(&new_client->dev,
-			   &sensor_dev_attr_temp1_input.dev_attr);
-	device_create_file(&new_client->dev,
-			   &sensor_dev_attr_temp2_input.dev_attr);
-	device_create_file(&new_client->dev,
-			   &sensor_dev_attr_temp1_min.dev_attr);
-	device_create_file(&new_client->dev,
-			   &sensor_dev_attr_temp2_min.dev_attr);
-	device_create_file(&new_client->dev,
-			   &sensor_dev_attr_temp1_max.dev_attr);
-	device_create_file(&new_client->dev,
-			   &sensor_dev_attr_temp2_max.dev_attr);
-	device_create_file(&new_client->dev, &dev_attr_temp1_crit);
-	device_create_file(&new_client->dev, &dev_attr_temp2_crit);
-	device_create_file(&new_client->dev, &dev_attr_temp1_hyst);
-	device_create_file(&new_client->dev, &dev_attr_temp2_hyst);
-	device_create_file(&new_client->dev, &dev_attr_alarms);
 
 	return 0;
 
-exit_detach:
-	i2c_detach_client(new_client);
+exit_remove:
+	sysfs_remove_group(&client->dev.kobj, &f75383_group);
 exit_free:
 	kfree(data);
-exit:
+	i2c_set_clientdata(client, NULL);
 	return err;
 }
 
-/* Idealy we shouldn't have to initialize anything, since the BIOS
-   should have taken care of everything */
-static void f75383_init_client(struct i2c_client *client)
+static int f75383_remove(struct i2c_client *client)
 {
 	struct f75383_data *data = i2c_get_clientdata(client);
-
-	data->config = i2c_smbus_read_byte_data(client, F75383_REG_CONFIG_READ);
-
-	/* Start converting if needed */
-	if (data->config & 0x40) { /* standby */
-		dev_dbg(&client->dev, "Switching to operational mode");
-		data->config &= 0xBF;
-		i2c_smbus_write_byte_data(client, F75383_REG_CONFIG_WRITE,
-					  data->config);
-	}
-
-}
-
-static int f75383_detach_client(struct i2c_client *client)
-{
-	struct f75383_data *data = i2c_get_clientdata(client);
-	int err;
-
-	hwmon_device_unregister(data->class_dev);
-
-	if ((err = i2c_detach_client(client)))
-		return err;
-
+	hwmon_device_unregister(data->hwmon_dev);
+	sysfs_remove_group(&client->dev.kobj, &f75383_group);
 	kfree(data);
+	i2c_set_clientdata(client, NULL);
+
 	return 0;
+
 }
+
 
 static struct f75383_data *f75383_update_device(struct device *dev)
 {
