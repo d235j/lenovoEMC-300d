@@ -1,5 +1,5 @@
 /*
- * GPIO driver for Fintek Super-I/O F71869, F71869A, F71882, F71889 and F81866
+ * GPIO driver for Fintek Super-I/O F71808E, F71869, F71869A, F71882, F71889 and F81866
  *
  * Copyright (C) 2010-2013 LaCie
  *
@@ -32,15 +32,17 @@
 #define SIO_LOCK_KEY		0xAA	/* Key to disable Super-I/O */
 
 #define SIO_FINTEK_ID		0x1934	/* Manufacturer ID */
+#define SIO_F71808E_ID		0x0901  /* F71808E chipset ID */
 #define SIO_F71869_ID		0x0814	/* F71869 chipset ID */
 #define SIO_F71869A_ID		0x1007	/* F71869A chipset ID */
 #define SIO_F71882_ID		0x0541	/* F71882 chipset ID */
 #define SIO_F71889_ID		0x0909	/* F71889 chipset ID */
 #define SIO_F81866_ID		0x1010	/* F81866 chipset ID */
 
-enum chips { f71869, f71869a, f71882fg, f71889f, f81866 };
+enum chips { f71808e, f71869, f71869a, f71882fg, f71889f, f81866 };
 
 static const char * const f7188x_names[] = {
+	"f71808e",
 	"f71869",
 	"f71869a",
 	"f71882fg",
@@ -151,6 +153,13 @@ static void f7188x_gpio_set(struct gpio_chip *chip, unsigned offset, int value);
 #define gpio_data_in(base) (base + 2)
 /* Output mode register (0:open drain 1:push-pull). */
 #define gpio_out_mode(base) (base + 3)
+
+static struct f7188x_gpio_bank f71808e_gpio_bank[] = {
+	F7188X_GPIO_BANK(0, 8, 0xF0),
+	F7188X_GPIO_BANK(10, 5, 0xE0),
+	F7188X_GPIO_BANK(20, 8, 0xD0),
+	F7188X_GPIO_BANK(30, 5, 0xC0),
+};
 
 static struct f7188x_gpio_bank f71869_gpio_bank[] = {
 	F7188X_GPIO_BANK(0, 6, 0xF0),
@@ -316,6 +325,10 @@ static int f7188x_gpio_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	switch (sio->type) {
+	case f71808e:
+		data->nr_bank = ARRAY_SIZE(f71808e_gpio_bank);
+		data->bank = f71808e_gpio_bank;
+		break;
 	case f71869:
 		data->nr_bank = ARRAY_SIZE(f71869_gpio_bank);
 		data->bank = f71869_gpio_bank;
@@ -380,6 +393,9 @@ static int __init f7188x_find(int addr, struct f7188x_sio *sio)
 
 	devid = superio_inw(addr, SIO_DEVID);
 	switch (devid) {
+	case SIO_F71808E_ID:
+		sio->type = f71808e;
+		break;
 	case SIO_F71869_ID:
 		sio->type = f71869;
 		break;
@@ -484,6 +500,6 @@ static void __exit f7188x_gpio_exit(void)
 }
 module_exit(f7188x_gpio_exit);
 
-MODULE_DESCRIPTION("GPIO driver for Super-I/O chips F71869, F71869A, F71882FG, F71889F and F81866");
+MODULE_DESCRIPTION("GPIO driver for Super-I/O chips F71808E, F71869, F71869A, F71882FG, F71889F and F81866");
 MODULE_AUTHOR("Simon Guinot <simon.guinot@sequanux.org>");
 MODULE_LICENSE("GPL");
