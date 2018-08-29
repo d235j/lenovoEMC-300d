@@ -16,6 +16,7 @@ fi
 
 if [[ ! $(lsmod | grep gpio_f7188x) ]]; then
     pushd $BASEDIR/gpio-f7188x
+    make clean
     make
     # Unloading the driver breaks things!
     #sudo rmmod gpio_f7188x 2>1 >/dev/null

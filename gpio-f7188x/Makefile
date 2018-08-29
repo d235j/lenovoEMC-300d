@@ -9,7 +9,7 @@ MODULE = gpio-f7188x
 EXTRA_CFLAGS =
 KDIR:=/lib/modules/$(shell uname -r)/build
 
-EXTRA_CFLAGS += -I$(KDIR)/drivers/usb/serial -Wall -Werror
+EXTRA_CFLAGS +=  -isystem -I$(KDIR)/drivers/usb/serial -Wall -Werror
 #CFLAGS +=  -g
 EXTRA_CFLAGS += -g
 EXTRA_CFLAGS += -DGSPCA_DEBUG
@@ -31,7 +31,7 @@ default:
 	$(MAKE) -C $(KDIR) EXTRA_CFLAGS="$(EXTRA_CFLAGS)" SUBDIRS=$(PWD) modules
 
 clean:
-	$(RM) *.mod.c *.o *.ko .*.cmd *~ Modules.* modules.*
+	$(RM) *.mod.c *.o *.ko .*.cmd *~ Modules.* modules.* .cache.mk
 
 load:
 	insmod $(MODULE).ko
